@@ -35,7 +35,13 @@ package loci.formats.tiff;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
+import java.nio.FloatBuffer;
+import java.nio.LongBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -87,6 +93,10 @@ public class TiffSaver {
 
   /** The codec options if set. */
   private CodecOptions options;
+
+  /** The byte buffer to use for writing IFDs.
+   * Defaults to a megabyte, but can grow if needed. */
+  private ByteBuffer ifdBuffer = ByteBuffer.allocate(1024 * 1024);
 
   // -- Constructors --
   /**
@@ -165,6 +175,7 @@ public class TiffSaver {
   /** Sets whether or not little-endian data should be written. */
   public void setLittleEndian(boolean littleEndian) {
     out.order(littleEndian);
+    ifdBuffer.order(littleEndian ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN);
   }
 
   /** Sets whether or not BigTIFF data should be written. */
@@ -450,8 +461,8 @@ public class TiffSaver {
       int nChannels, boolean last, int x, int y)
   throws FormatException, IOException {
     LOGGER.debug("Attempting to write image IFD.");
-    boolean isTiled = ifd.isTiled();
     long defaultByteCount = 0L;
+    boolean isTiled = ifd.isTiled();
 
     RandomAccessInputStream in = null;
     try {
@@ -492,34 +503,140 @@ public class TiffSaver {
     throws FormatException, IOException
   {
     TreeSet<Integer> keys = new TreeSet<Integer>(ifd.keySet());
+    keys.remove(new Integer(IFD.LITTLE_ENDIAN));
+    keys.remove(new Integer(IFD.BIG_TIFF));
+    keys.remove(new Integer(IFD.REUSE));
     int keyCount = keys.size();
 
-    if (ifd.containsKey(new Integer(IFD.LITTLE_ENDIAN))) keyCount--;
-    if (ifd.containsKey(new Integer(IFD.BIG_TIFF))) keyCount--;
-    if (ifd.containsKey(new Integer(IFD.REUSE))) keyCount--;
-
-    long fp = out.getFilePointer();
     int bytesPerEntry = bigTiff ? TiffConstants.BIG_TIFF_BYTES_PER_ENTRY :
       TiffConstants.BYTES_PER_ENTRY;
     int ifdBytes = (bigTiff ? 16 : 6) + bytesPerEntry * keyCount;
-
-    if (bigTiff) out.writeLong(keyCount);
-    else out.writeShort(keyCount);
-
-    ByteArrayHandle extra = new ByteArrayHandle();
-    RandomAccessOutputStream extraStream = new RandomAccessOutputStream(extra);
-
-    for (Integer key : keys) {
-      if (key.equals(IFD.LITTLE_ENDIAN) || key.equals(IFD.BIG_TIFF) ||
-          key.equals(IFD.REUSE)) continue;
-
-      Object value = ifd.get(key);
-      writeIFDValue(extraStream, ifdBytes + fp, key.intValue(), value);
+    int extraSize = 0;
+    for (Integer key: keys) {
+      extraSize += getExtraSize(ifd.get(key));
     }
-    if (bigTiff) out.seek(out.getFilePointer());
-    writeIntValue(out, nextOffset);
-    out.write(extra.getBytes(), 0, (int) extra.length());
-    extraStream.close();
+
+    if (ifdBuffer.capacity() < ifdBytes + extraSize) {
+      // Allocate a new buffer, rounding up to the next 16K boundary
+      ifdBuffer = ByteBuffer.allocate((ifdBytes + extraSize + 0x3FFF) & ~0x3FFF);
+    }
+    // Prep the buffers for filling
+    ifdBuffer.clear();
+    ifdBuffer.position(ifdBytes);
+    ByteBuffer extraBuf = ifdBuffer.slice();
+    ifdBuffer.flip();
+    setLittleEndian(isLittleEndian());
+    extraBuf.order(ifdBuffer.order());
+
+    long offset = out.getFilePointer() + ifdBytes;
+
+    // Fill those buffers!
+    if (bigTiff) ifdBuffer.putLong (       keyCount);
+    else         ifdBuffer.putShort((short)keyCount);
+    for (Integer key : keys) {
+      writeIFDField(extraBuf, offset, key.intValue(), ifd.get(key));
+    }
+    if (bigTiff) ifdBuffer.putLong(     nextOffset);
+    else         ifdBuffer.putInt ((int)nextOffset);
+
+    // Prep the buffer for writing
+    ifdBuffer.position(0);
+    ifdBuffer.limit(ifdBytes + extraSize);
+
+    out.write(ifdBuffer, 0, ifdBuffer.limit());
+  }
+
+  /** Return the number of elements in the given value. */
+  private int getCount(Object value)
+  {
+    int length;
+    if (value instanceof String) {
+      // make sure to leave space for the null at the end
+      return ((String)value).length() + 1;
+    } else {
+      try {
+        return java.lang.reflect.Array.getLength(value);
+      } catch (IllegalArgumentException e) {
+        return 1;
+      }
+    }
+  }
+
+  /** Return the amount of space required to store the given value outside the IFD entry. */
+  private int getExtraSize(Object value)
+  {
+    IFDType type = IFDType.forObject(value, bigTiff);
+    // Size, rounded up to the nearest even number (since the value offsets are expected to be even).
+    int size = (type.getBytesPerElement() * getCount(value) + 1) & ~1;
+    // int size = type.getBytesPerElement() * getCount(value);
+    return (size <= (bigTiff ? 8 : 4)) ? 0 : size;
+  }
+
+  /**
+   * Writes the given IFD value to the given output object.
+   * @param extraOut buffer to which "extra" IFD information should be written
+   * @param offset global offset to use for IFD offset values
+   * @param tag IFD tag to write
+   * @param value IFD value to write
+   */
+  private void writeIFDField(ByteBuffer extraBuf, long offset, int tag, Object value)
+    throws FormatException
+  {
+    ifdBuffer.putShort((short)tag);
+    ifdBuffer.putShort((short)(IFDType.forObject(value, bigTiff).getCode()));
+    if (bigTiff) ifdBuffer.putLong(getCount(value));
+    else         ifdBuffer.putInt (getCount(value));
+    if (getExtraSize(value) > 0) {
+      if (bigTiff) ifdBuffer.putLong(      offset + extraBuf.position());
+      else         ifdBuffer.putInt ((int)(offset + extraBuf.position()));
+      writeIFDValue(extraBuf, value);
+      // Extend to the next even offset
+      extraBuf.position((extraBuf.position() + 1) & ~1);
+    } else {
+      int pos = ifdBuffer.position();
+      writeIFDValue(ifdBuffer, value);
+      // Move to the next IFDEntry, regardless of the value padding needed
+      ifdBuffer.position(pos + (bigTiff ? 8 : 4));
+    }
+  }
+
+  private void writeIFDValue(ByteBuffer buf, Object value)
+    throws FormatException
+  {
+    // Single values
+    if      (value instanceof Float)   buf.putFloat (((Float)  value).floatValue ());
+    else if (value instanceof Double)  buf.putDouble(((Double) value).doubleValue());
+    else if (value instanceof Short)   buf.put      (((Short)  value).byteValue  ());
+    else if (value instanceof Integer) buf.putShort (((Integer)value).shortValue ());
+    else if (value instanceof Long) {
+      if (bigTiff)                     buf.putLong  (((Long)   value).longValue  ());
+      else                             buf.putInt   (((Long)   value).intValue   ());
+    } else if (value instanceof TiffRational) {
+      buf.putInt((int)(((TiffRational)value).getNumerator()));
+      buf.putInt((int)(((TiffRational)value).getDenominator()));
+    } else if (value instanceof String) {
+      buf.put(((String)value).getBytes(StandardCharsets.US_ASCII));
+      buf.put((byte)0);
+    }
+
+    // Arrays
+    else if (value instanceof float[])             buf.position(buf.position() + 4 * buf.asFloatBuffer ().put( (float[])value).position());
+    else if (value instanceof double[])            buf.position(buf.position() + 8 * buf.asDoubleBuffer().put((double[])value).position());
+    else if ((value instanceof long[]) && bigTiff) buf.position(buf.position() + 8 * buf.asLongBuffer  ().put(  (long[])value).position());
+
+    // Sigh... cannot do bulk operations here because of the narrowing conversions involved.
+    else if (value instanceof short[]) for (short v : (short[])value) buf.put     ((byte) v);
+    else if (value instanceof int[])   for (int   v : (int[])  value) buf.putShort((short)v);
+    else if (value instanceof long[])  for (long  v : (long[]) value) buf.putInt  ((int)  v);
+    else if (value instanceof TiffRational[]) {
+      for (TiffRational v : (TiffRational[])value) {
+        buf.putInt((int)(v.getNumerator()));
+        buf.putInt((int)(v.getDenominator()));
+      }
+    } else {
+      throw new FormatException("Unknown IFD value type (" +
+        value.getClass().getName() + "): " + value);
+    }
   }
 
   /**
@@ -1060,5 +1177,6 @@ public class TiffSaver {
     if (LOGGER.isDebugEnabled()) {
       LOGGER.debug("Offset after IFD write: {}", out.getFilePointer());
     }
+    out.seek(endFP);
   }
 }

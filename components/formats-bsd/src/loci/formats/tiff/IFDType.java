@@ -93,6 +93,39 @@ public enum IFDType implements CodedEnum {
   }
 
   /**
+   * Determines the appropriate IFD type to use for writing a given native value.
+   * This assumes that unsigned IFD values are stored in oversized signed native values,
+   * and has no support for representing true signed IFD values.
+   * This assumption matches prior usage in <code>TiffSaver</code>.
+   * Long values are always treated as IFD LONG instead of LONG8.
+   * @param value The native value to write.
+   * @return The <code>IFDType</code> instance to use for writing the value.
+   */
+  public static IFDType forObject(Object value) {
+    return forObject(value, false);
+  }
+
+  /**
+   * Determines the appropriate IFD type to use for writing a given native value.
+   * This assumes that unsigned IFD values are stored in oversized signed native values,
+   * and has no support for representing true signed IFD values.
+   * This assumption matches prior usage in <code>TiffSaver</code>.
+   * @param value The native value to write.
+   * @param bigTiff true if Long values should be treated as LONG8 instead of LONG.
+   * @return The <code>IFDType</code> instance to use for writing the value.
+   */
+  public static IFDType forObject(Object value, boolean bigTiff) {
+    if (value instanceof Short        || value instanceof short[]       ) return BYTE;
+    if (value instanceof Integer      || value instanceof int[]         ) return SHORT;
+    if (value instanceof Long         || value instanceof long[]        ) return bigTiff ? LONG8 : LONG;
+    if (value instanceof Float        || value instanceof float[]       ) return FLOAT;
+    if (value instanceof Double       || value instanceof double[]      ) return DOUBLE;
+    if (value instanceof TiffRational || value instanceof TiffRational[]) return RATIONAL;
+    if (value instanceof String)                                          return ASCII;
+    return UNDEFINED;
+  }
+
+  /**
    * Default constructor.
    * @param code Integer "code" for the IFD type.
    * @param bytesPerElement Number of bytes per element.
