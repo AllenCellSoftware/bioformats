@@ -53,6 +53,12 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.List;
+
 /**
  * Tests the functionality of TiffWriter
  */
@@ -132,6 +138,13 @@ public class TiffWriterTest {
 
   @Test
   public void testSetBigTiffFileTooLarge() throws IOException, FormatException {
+    {
+      LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+      List<ch.qos.logback.classic.Logger> loggerList = loggerContext.getLoggerList();
+      for (ch.qos.logback.classic.Logger tmpLogger: loggerList) tmpLogger.setLevel(Level.DEBUG);
+    }
+    try {
+
     // Test that no exception is thrown while below the big tiff limit (2147483648L)
     // Exception is thrown when size is out.length() + 2 * (width * height * c * bytesPerPixel)
     writer.setMetadataRetrieve(metadata);
@@ -144,14 +157,22 @@ public class TiffWriterTest {
     //Test format exception is thrown after the big tiff limit (2147483648L)
     boolean thrown = false;
     try {
+      System.out.println("YIP YIP YIP");
       writer.saveBytes(1, buf, ifd);
     }
     catch(FormatException e) {
+      System.out.println(e);
       if (e.getMessage().contains("File is too large; call setBigTiff(true)")) {
         thrown = true;
       }
     }
     assert(thrown);
+
+    } finally {
+      LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+      List<ch.qos.logback.classic.Logger> loggerList = loggerContext.getLoggerList();
+      for (ch.qos.logback.classic.Logger tmpLogger: loggerList) tmpLogger.setLevel(Level.WARN);
+    }
   }
   
   @Test

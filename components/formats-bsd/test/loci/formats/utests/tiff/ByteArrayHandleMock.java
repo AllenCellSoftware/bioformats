@@ -39,6 +39,8 @@ import loci.common.ByteArrayHandle;
 public class ByteArrayHandleMock extends ByteArrayHandle {
   
   private long mockCapacity;
+  private long mockPosition;
+  private long lastPosition;
   
   public ByteArrayHandleMock(int capacity) {
     buffer = ByteBuffer.allocate(INITIAL_LENGTH);
@@ -58,19 +60,30 @@ public class ByteArrayHandleMock extends ByteArrayHandle {
   
   @Override
   public void seek(long pos) throws IOException {
+    mockPosition = pos;
     if (pos > length()) {
       setLength(pos);
     }
     if (pos > INITIAL_LENGTH) {
       buffer.position((int) INITIAL_LENGTH);
+      lastPosition = INITIAL_LENGTH;
     }
     else {
       buffer.position((int) pos);
+      lastPosition = pos;
     }
+  }
+
+  @Override
+  public long getFilePointer() {
+    return mockPosition + super.getFilePointer() - lastPosition;
   }
   
   @Override
   public void write(byte[] b, int off, int len) throws IOException {
     mockCapacity += b.length;
+    if (getFilePointer() < INITIAL_LENGTH) {
+      super.write(b, off, (int)Math.max(len, INITIAL_LENGTH - getFilePointer()));
+    }
   }
 }
